@@ -8,6 +8,7 @@ import {
   DEEP_RESEARCH_DEFAULT_TIMEOUT_MS,
   FINISHED_ACTIONS_SELECTOR,
   STOP_BUTTON_SELECTOR,
+  INPUT_SELECTORS,
 } from "../constants.js";
 import { buildConversationTurnListExpression } from "../conversationTurns.js";
 import { delay } from "../utils.js";
@@ -19,13 +20,13 @@ import {
   throwIfAssistantUiError,
 } from "./assistantResponse.js";
 import { BrowserAutomationError } from "../../oracle/errors.js";
+import { readNativeResearchReport } from "../nativeDeepResearch.js";
 
 type ActivateOutcome =
-  | { status: "activated" }
+  | { status: "selection-ready"; clickPoint: { x: number; y: number } }
   | { status: "already-active" }
   | { status: "plus-button-missing" }
-  | { status: "dropdown-item-missing"; available?: string[] }
-  | { status: "pill-not-confirmed"; clickPoint?: { x?: number; y?: number } };
+  | { status: "dropdown-item-missing"; available?: string[] };
 
 /**
  * Activates Deep Research mode through ChatGPT's composer tools menu and
@@ -45,9 +46,6 @@ export async function activateDeepResearch(
   const result = outcome.result?.value as ActivateOutcome | undefined;
 
   switch (result?.status) {
-    case "activated":
-      logger("Deep Research mode activated");
-      return;
     case "already-active":
       logger("Deep Research mode already active");
       return;
@@ -66,10 +64,10 @@ export async function activateDeepResearch(
         { stage: "deep-research-activate", code: "dropdown-item-missing" },
       );
     }
-    case "pill-not-confirmed": {
+    case "selection-ready": {
       const point = result.clickPoint;
       if (typeof point?.x === "number" && typeof point.y === "number") {
-        await clickTrustedPoint(Runtime, Input, point.x, point.y);
+        await clickTrustedPoint(Input, point.x, point.y);
         if (await waitForDeepResearchPill(Runtime)) {
           logger("Deep Research mode activated");
           return;
@@ -88,7 +86,6 @@ export async function activateDeepResearch(
 }
 
 async function clickTrustedPoint(
-  Runtime: ChromeClient["Runtime"],
   Input: ChromeClient["Input"],
   x: number,
   y: number,
@@ -99,15 +96,13 @@ async function clickTrustedPoint(
     await Input.dispatchMouseEvent({ type: "mouseReleased", x, y, button: "left", clickCount: 1 });
     return;
   }
-  await Runtime.evaluate({
-    expression: `(() => {
-      const el = document.elementFromPoint(${JSON.stringify(x)}, ${JSON.stringify(y)});
-      if (!(el instanceof HTMLElement)) return false;
-      el.click();
-      return true;
-    })()`,
-    returnByValue: true,
-  });
+  throw new BrowserAutomationError(
+    "Deep Research requires trusted Chrome input; nothing was submitted.",
+    {
+      stage: "deep-research-activate",
+      code: "trusted-input-unavailable",
+    },
+  );
 }
 
 async function waitForDeepResearchPill(
@@ -135,6 +130,8 @@ export async function waitForResearchPlanAutoConfirm(
     client?: ChromeClient;
     ignoredTargetKeys?: readonly string[];
     targetBaselineCaptured?: boolean;
+    conversationId?: string;
+    submittedPromptHash?: string;
     minTurnIndex?: number | null;
     onPlan?: (plan: BrowserResearchPlanMetadata) => void | Promise<void>;
   },
@@ -148,8 +145,32 @@ export async function waitForResearchPlanAutoConfirm(
   let loggedPlan = false;
   const targetOwnerMinTurnIndex =
     minTurnIndex >= 0 && options?.targetBaselineCaptured !== true ? minTurnIndex : -1;
+  let lastNativePlanReadAt = 0;
+  let nativePlan: DeepResearchFrameStatus | null = null;
 
   const readPlanStatus = async (): Promise<DeepResearchFrameStatus | null> => {
+    if (
+      options?.conversationId &&
+      options.submittedPromptHash &&
+      Date.now() - lastNativePlanReadAt >= 15000
+    ) {
+      lastNativePlanReadAt = Date.now();
+      const native = await readNativeResearchReport(
+        Runtime,
+        options.conversationId,
+        options.submittedPromptHash,
+      ).catch(() => null);
+      if (native?.plan)
+        nativePlan = {
+          completed: native.completed,
+          inProgress: !native.completed,
+          researchStarted: native.plan.phase === "researching",
+          planTitle: native.plan.title,
+          planSteps: native.plan.steps,
+          textLength: native.text.length,
+        };
+    }
+    if (nativePlan) return nativePlan;
     const targetRead = options?.client
       ? ((
           await readDeepResearchTargetResult(
@@ -313,6 +334,8 @@ export async function waitForDeepResearchCompletion(
     ignoredTargetKeys?: readonly string[];
     requireScopedTargetOwner?: boolean;
     targetBaselineCaptured?: boolean;
+    conversationId?: string;
+    submittedPromptHash?: string;
   },
 ): Promise<{
   text: string;
@@ -332,11 +355,33 @@ export async function waitForDeepResearchCompletion(
     options?.requireScopedTargetOwner === true ||
     (scopedToNewTurns && options?.targetBaselineCaptured !== true);
   let observedResearchEvidence = false;
+  let nativeStateObserved = false;
+  let lastNativeReadAt = 0;
   let loggedIncompleteResult = false;
 
   logger(`Monitoring Deep Research (timeout: ${Math.round(timeoutMs / 60_000)}min)...`);
 
   while (Date.now() - start < timeoutMs) {
+    if (
+      options?.conversationId &&
+      options.submittedPromptHash &&
+      Date.now() - lastNativeReadAt >= 15000
+    ) {
+      lastNativeReadAt = Date.now();
+      const native = await readNativeResearchReport(
+        Runtime,
+        options.conversationId,
+        options.submittedPromptHash,
+      ).catch(() => null);
+      if (native?.completed) {
+        logger(
+          "Deep Research completed; retrieved the native widget report for the committed user turn.",
+        );
+        return { text: native.text, meta: { messageId: native.messageId, turnId: null } };
+      }
+      observedResearchEvidence ||= native !== null;
+      nativeStateObserved ||= native !== null;
+    }
     const { result } = await Runtime.evaluate({
       expression: buildDeepResearchCompletionPollExpression(minTurnLiteral),
       returnByValue: true,
@@ -419,7 +464,7 @@ export async function waitForDeepResearchCompletion(
     }
 
     // Completion detected
-    if (val?.finished) {
+    if (val?.finished && !nativeStateObserved) {
       if (!observedResearchEvidence) {
         throw new BrowserAutomationError(
           "ChatGPT returned a completed response without starting Deep Research. The Deep Research selection may have silently fallen back to a normal response.",
@@ -1296,16 +1341,20 @@ function buildFindDeepResearchPillExpression(functionName = "findDeepResearchPil
         '.__composer-pill-composite',
         '.__composer-pill',
         '[class*="composer-pill"]',
+        '[data-inline-selection-pill]',
       ].join(',');
       const candidates = Array.from(document.querySelectorAll(selectors));
-      const composerRoots = Array.from(document.querySelectorAll('[data-testid="composer"], form, [class*="composer"]'));
-      for (const root of composerRoots) {
-        candidates.push(...Array.from(root.querySelectorAll('button, [role="button"], [class*="pill"], [class*="composer-pill"]')));
+      const editorSelectors = ${JSON.stringify(INPUT_SELECTORS)};
+      for (const mention of document.querySelectorAll('[app-mention-name]')) {
+        if (editorSelectors.some(selector => mention.closest(selector))) candidates.push(mention);
       }
       const seen = new Set();
       for (const pill of candidates) {
         if (!(pill instanceof Element) || seen.has(pill)) continue;
         seen.add(pill);
+        // A visible menu option is not evidence that the tool was selected.
+        // In particular, retries can leave the composer tools menu open.
+        if (pill.closest('[role="menu"], [role="menuitem"], [role="menuitemradio"], [role="option"], [data-radix-popper-content-wrapper], [data-floating-ui-portal], [data-composer-overlay-floating-ui="true"], .popover, [class*="popover"], .__menu-item, [class*="__menu-item"]')) continue;
         const rect = pill.getBoundingClientRect?.();
         if (!rect || rect.width <= 0 || rect.height <= 0) continue;
         const text = (pill.textContent || '').replace(/\\s+/g, ' ').trim().toLowerCase();
@@ -1354,18 +1403,6 @@ function buildActivateDeepResearchExpression(): string {
     ${buildClickDispatcher()}
     ${buildFindDeepResearchPillExpression()}
 
-    const waitForPill = () => new Promise((resolve) => {
-      let elapsed = 0;
-      const tick = () => {
-        if (findDeepResearchPill()) {
-          resolve(true); return;
-        }
-        elapsed += 200;
-        if (elapsed > 5000) { resolve(false); return; }
-        setTimeout(tick, 200);
-      };
-      setTimeout(tick, 200);
-    });
 
     const menuItemSelector = [
       '[data-radix-collection-item]',
@@ -1394,6 +1431,7 @@ function buildActivateDeepResearchExpression(): string {
       '[class*="popover"]',
       '[data-radix-popper-content-wrapper]',
       '[data-floating-ui-portal]',
+      '[data-composer-overlay-floating-ui="true"]',
     ].join(',');
     const normalizeText = (value) => String(value || '').replace(/\\s+/g, ' ').trim().toLowerCase();
     const compactText = (value) => normalizeText(value).replace(/\\s+/g, '');
@@ -1488,7 +1526,9 @@ function buildActivateDeepResearchExpression(): string {
         )
       );
     if (!plusBtn) return { status: 'plus-button-missing' };
-    dispatchClickSequence(plusBtn);
+    if (!findDeepResearchItem({ requirePopover: true })) {
+      dispatchClickSequence(plusBtn);
+    }
 
     // Step 2: Wait for dropdown
     const waitForDropdown = () => new Promise((resolve) => {
@@ -1530,11 +1570,8 @@ function buildActivateDeepResearchExpression(): string {
     const clickPoint = rect && rect.width > 0 && rect.height > 0
       ? { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
       : undefined;
-    dispatchClickSequence(match);
-
-    // Step 5: Verify pill appeared
-    const pillConfirmed = await waitForPill();
-    return pillConfirmed ? { status: 'activated' } : { status: 'pill-not-confirmed', clickPoint };
+    // The caller selects this exact row with trusted Chrome input, then verifies it.
+    return clickPoint ? { status: 'selection-ready', clickPoint } : { status: 'dropdown-item-missing' };
   })()`;
 }
 

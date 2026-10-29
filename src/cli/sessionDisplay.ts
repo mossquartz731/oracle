@@ -281,7 +281,10 @@ export async function attachSession(
   const workerAlive = isProcessAlive(metadata.lifecycle?.workerPid);
 
   const hasChromeDisconnect = metadata.response?.incompleteReason === "chrome-disconnected";
-  const hasIncompleteCapture = metadata.response?.incompleteReason === "incomplete-capture";
+  const hasIncompleteCapture =
+    metadata.response?.incompleteReason === "incomplete-capture" ||
+    (isDeepResearchBrowserSession(metadata) &&
+      metadata.error?.details?.stage === "deep-research-not-started");
   const statusAllowsReattach =
     metadata.status === "running" ||
     (metadata.status === "error" && (hasChromeDisconnect || hasIncompleteCapture));

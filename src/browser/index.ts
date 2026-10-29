@@ -79,7 +79,6 @@ import {
   createAssistantTimeoutError,
 } from "./uiWarnings.js";
 import {
-  activateDeepResearch,
   captureDeepResearchTargetKeys,
   waitForDeepResearchCompletion,
   waitForResearchPlanAutoConfirm,
@@ -1630,25 +1629,6 @@ async function runBrowserModeInternal(
         await waitForAttachmentCompletion(Runtime, attachmentWaitBudget, attachmentNames, logger);
         logger("All attachments uploaded");
       }
-      if (deepResearch) {
-        await raceWithDisconnect(
-          withRetries(() => activateDeepResearch(Runtime, Input, logger), {
-            retries: 2,
-            delayMs: 500,
-            onRetry: (attempt, error) => {
-              if (options.verbose) {
-                logger(
-                  `[retry] Deep Research activation attempt ${attempt + 1}: ${error instanceof Error ? error.message : error}`,
-                );
-              }
-            },
-          }),
-        );
-        await raceWithDisconnect(ensurePromptReady(Runtime, config.inputTimeoutMs, logger));
-        logger(
-          `Prompt textarea ready (after Deep Research activation, ${prompt.length.toLocaleString()} chars queued)`,
-        );
-      }
       let baselineTurns = await readConversationTurnCount(Runtime, logger);
       // Learned: return baselineTurns so assistant polling can ignore earlier content.
       const providerState: Record<string, unknown> = {
@@ -1670,6 +1650,7 @@ async function runBrowserModeInternal(
         attachmentNavigationUrl,
         onPromptSubmitted: markPromptSubmitted,
         webSearch: config.researchMode === "search",
+        deepResearch,
       };
       const deepResearchTargetBaseline =
         deepResearch && client
@@ -1768,6 +1749,8 @@ async function runBrowserModeInternal(
         waitForResearchPlanAutoConfirm(Runtime, logger, undefined, {
           Page,
           client,
+          conversationId: lastUrl ? extractConversationIdFromUrl(lastUrl) : undefined,
+          submittedPromptHash: submittedPromptHash ?? undefined,
           ignoredTargetKeys: deepResearchTargetKeys,
           targetBaselineCaptured: deepResearchTargetBaselineCaptured,
           minTurnIndex: baselineTurns,
@@ -1788,6 +1771,8 @@ async function runBrowserModeInternal(
           {
             ignoredTargetKeys: deepResearchTargetKeys,
             targetBaselineCaptured: deepResearchTargetBaselineCaptured,
+            conversationId: lastUrl ? extractConversationIdFromUrl(lastUrl) : undefined,
+            submittedPromptHash: submittedPromptHash ?? undefined,
           },
         ),
       );
@@ -3159,23 +3144,6 @@ async function runRemoteBrowserMode(
         await waitForAttachmentCompletion(Runtime, attachmentWaitBudget, attachmentNames, logger);
         logger("All attachments uploaded");
       }
-      if (deepResearch) {
-        await withRetries(() => activateDeepResearch(Runtime, Input, logger), {
-          retries: 2,
-          delayMs: 500,
-          onRetry: (attempt, error) => {
-            if (options.verbose) {
-              logger(
-                `[retry] Deep Research activation attempt ${attempt + 1}: ${error instanceof Error ? error.message : error}`,
-              );
-            }
-          },
-        });
-        await ensurePromptReady(Runtime, config.inputTimeoutMs, logger);
-        logger(
-          `Prompt textarea ready (after Deep Research activation, ${prompt.length.toLocaleString()} chars queued)`,
-        );
-      }
       let baselineTurns = await readConversationTurnCount(Runtime, logger);
       const providerState: Record<string, unknown> = {
         runtime: Runtime,
@@ -3196,6 +3164,7 @@ async function runRemoteBrowserMode(
         attachmentNavigationUrl,
         onPromptSubmitted: markPromptSubmitted,
         webSearch: config.researchMode === "search",
+        deepResearch,
       };
       const deepResearchTargetBaseline =
         deepResearch && client
@@ -3261,6 +3230,8 @@ async function runRemoteBrowserMode(
       await waitForResearchPlanAutoConfirm(Runtime, logger, undefined, {
         Page,
         client,
+        conversationId: lastUrl ? extractConversationIdFromUrl(lastUrl) : undefined,
+        submittedPromptHash: submittedPromptHash ?? undefined,
         ignoredTargetKeys: deepResearchTargetKeys,
         targetBaselineCaptured: deepResearchTargetBaselineCaptured,
         minTurnIndex: baselineTurns,
@@ -3279,6 +3250,8 @@ async function runRemoteBrowserMode(
         {
           ignoredTargetKeys: deepResearchTargetKeys,
           targetBaselineCaptured: deepResearchTargetBaselineCaptured,
+          conversationId: lastUrl ? extractConversationIdFromUrl(lastUrl) : undefined,
+          submittedPromptHash: submittedPromptHash ?? undefined,
         },
       );
       await activeConversationUrlMonitor.update("post-deep-research", 15_000).catch(() => false);

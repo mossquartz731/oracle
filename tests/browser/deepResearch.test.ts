@@ -27,6 +27,7 @@ import {
   checkDeepResearchStatus,
 } from "../../src/browser/actions/deepResearch.js";
 import type { BrowserLogger } from "../../src/browser/types.js";
+import { INPUT_SELECTORS } from "../../src/browser/constants.js";
 import { FakeDocument, FakeElement } from "./domFixture.js";
 
 function createMockRuntime() {
@@ -82,13 +83,25 @@ describe("activateDeepResearch", () => {
   });
 
   it("activates Deep Research when all steps succeed", async () => {
-    mockRuntime.evaluate.mockResolvedValueOnce({
-      result: { value: { status: "activated" } },
-    });
+    const dispatchMouseEvent = vi.fn(async () => undefined);
+    mockInput = { dispatchMouseEvent };
+    mockRuntime.evaluate
+      .mockResolvedValueOnce({
+        result: { value: { status: "selection-ready", clickPoint: { x: 12, y: 34 } } },
+      })
+      .mockResolvedValueOnce({ result: { value: true } });
     await expect(
       activateDeepResearch(mockRuntime as never, mockInput as never, mockLogger),
     ).resolves.toBeUndefined();
     expect(mockLogger).toHaveBeenCalledWith("Deep Research mode activated");
+    expect(dispatchMouseEvent).toHaveBeenCalledTimes(3);
+    expect(dispatchMouseEvent).toHaveBeenCalledWith({
+      type: "mousePressed",
+      x: 12,
+      y: 34,
+      button: "left",
+      clickCount: 1,
+    });
   });
 
   it("returns early when already active", async () => {
@@ -125,35 +138,24 @@ describe("activateDeepResearch", () => {
   });
 
   it("throws when pill does not confirm", async () => {
-    mockRuntime.evaluate.mockResolvedValueOnce({
-      result: { value: { status: "pill-not-confirmed" } },
-    });
+    mockInput = { dispatchMouseEvent: vi.fn(async () => undefined) };
+    mockRuntime.evaluate
+      .mockResolvedValueOnce({
+        result: { value: { status: "selection-ready", clickPoint: { x: 12, y: 34 } } },
+      })
+      .mockResolvedValueOnce({ result: { value: false } });
     await expect(
       activateDeepResearch(mockRuntime as never, mockInput as never, mockLogger),
     ).rejects.toThrow(/pill did not appear/);
   });
 
-  it("falls back to a trusted point click when the menu row ignores synthetic clicks", async () => {
-    const dispatchMouseEvent = vi.fn(async () => undefined);
-    mockInput = { dispatchMouseEvent };
-    mockRuntime.evaluate
-      .mockResolvedValueOnce({
-        result: { value: { status: "pill-not-confirmed", clickPoint: { x: 12, y: 34 } } },
-      })
-      .mockResolvedValueOnce({ result: { value: true } });
-
+  it("refuses an untrusted fallback when Chrome input is unavailable", async () => {
+    mockRuntime.evaluate.mockResolvedValueOnce({
+      result: { value: { status: "selection-ready", clickPoint: { x: 12, y: 34 } } },
+    });
     await expect(
       activateDeepResearch(mockRuntime as never, mockInput as never, mockLogger),
-    ).resolves.toBeUndefined();
-    expect(dispatchMouseEvent).toHaveBeenCalledTimes(3);
-    expect(dispatchMouseEvent).toHaveBeenCalledWith({
-      type: "mousePressed",
-      x: 12,
-      y: 34,
-      button: "left",
-      clickCount: 1,
-    });
-    expect(mockLogger).toHaveBeenCalledWith("Deep Research mode activated");
+    ).rejects.toThrow(/requires trusted Chrome input/);
   });
 
   it("throws on unexpected result", async () => {
@@ -188,106 +190,147 @@ describe("Deep Research activation expression", () => {
   });
 
   it.each([
-    ["深度研究 获取详细报告", "深度研究", "添加文件等"],
-    ["DeepResearch", "Deep research", "Add files and more"],
-    ["Deep Research Get a detailed report", "Deep research", "Add files and more"],
-  ])("activates %s without clicking the GitHub connector", async (row, pill, plusLabel) => {
-    const expression = buildActivateDeepResearchExpressionForTest();
-    let menuOpen = false;
-    let activated = false;
+    ["深度研究 获取详细报告", "深度研究", "添加文件等", false, false, false],
+    ["DeepResearch", "Deep research", "Add files and more", false, false, false],
+    [
+      "Deep Research Get a detailed report",
+      "Deep research",
+      "Add files and more",
+      false,
+      false,
+      false,
+    ],
+    ["Deep research", "Deep research", "Add files and more", true, false, false],
+    [
+      "Deep research Get a detailed report",
+      "Deep research",
+      "Add files and more",
+      false,
+      true,
+      false,
+    ],
+    ["Deep research", "Deep research", "Add files and more", false, true, true],
+  ] as const)(
+    "activates %s without clicking the GitHub connector",
+    async (row, pill, plusLabel, menuInitiallyOpen, inlineLayout, initiallyActive) => {
+      const expression = buildActivateDeepResearchExpressionForTest();
+      let menuOpen = menuInitiallyOpen;
+      let activated = initiallyActive;
 
-    class FakeEventTarget {
-      dispatchEvent(event: { type?: string }) {
-        if (event.type === "click") this.onClick();
-        return true;
+      class FakeEventTarget {
+        dispatchEvent(event: { type?: string }) {
+          if (event.type === "click") this.onClick();
+          return true;
+        }
+
+        onClick() {}
       }
 
-      onClick() {}
-    }
+      class FakeElement extends FakeEventTarget {
+        className = "__menu-item";
+        clickCount = 0;
+        top = 20;
 
-    class FakeElement extends FakeEventTarget {
-      className = "__menu-item";
-      clickCount = 0;
+        constructor(
+          readonly textContent: string,
+          private readonly ariaLabel = "",
+          private readonly inPopover = false,
+          private readonly clickAction?: () => void,
+          private readonly inEditor = false,
+        ) {
+          super();
+        }
 
-      constructor(
-        readonly textContent: string,
-        private readonly ariaLabel = "",
-        private readonly inPopover = false,
-        private readonly clickAction?: () => void,
-      ) {
-        super();
+        getAttribute(name: string) {
+          return name === "aria-label" ? this.ariaLabel : null;
+        }
+
+        getBoundingClientRect() {
+          return { left: 10, top: this.top, width: 200, height: 40 };
+        }
+
+        closest(selector: string) {
+          if (INPUT_SELECTORS.includes(selector)) return this.inEditor ? this : null;
+          if (selector.includes("popover")) {
+            const containerMatched = !inlineLayout || selector.includes("data-composer-overlay");
+            return this.inPopover && containerMatched ? popover : null;
+          }
+          return this;
+        }
+
+        querySelector() {
+          return null;
+        }
+
+        querySelectorAll() {
+          return [];
+        }
+
+        scrollIntoView() {}
+
+        override onClick() {
+          this.clickCount += 1;
+          this.clickAction?.();
+        }
       }
 
-      getAttribute(name: string) {
-        return name === "aria-label" ? this.ariaLabel : null;
+      const popover = {};
+      const plusButton = new FakeElement("", plusLabel, false, () => {
+        menuOpen = !menuOpen;
+      });
+      const githubRow = new FakeElement("GitHub 搜索和引用代码", "", true);
+      const deepResearchRow = new FakeElement(row, "", true, () => {
+        activated = true;
+      });
+      deepResearchRow.top = 80;
+      const deepResearchPill = new FakeElement(pill, "", false, undefined, true);
+      const historyMention = new FakeElement("Deep research");
+      const menuRows = [githubRow, deepResearchRow];
+      const composerRoot = {
+        querySelectorAll: () => (menuOpen ? menuRows : []),
+      };
+      const document = {
+        querySelector: () => null,
+        querySelectorAll: (selector: string) => {
+          if (selector.includes("composer-pill")) {
+            return activated && !inlineLayout ? [deepResearchPill] : [];
+          }
+          if (selector === "[app-mention-name]") {
+            return activated && inlineLayout
+              ? [historyMention, deepResearchPill]
+              : [historyMention];
+          }
+          if (selector === '[data-testid="composer"], form, [class*="composer"]') {
+            return [composerRoot];
+          }
+          if (selector === 'input, textarea, [contenteditable="true"]') return [];
+          if (selector === "button") return [plusButton];
+          if (selector.includes('[role="menuitemradio"]')) return menuOpen ? menuRows : [];
+          return [];
+        },
+      };
+      class FakeMouseEvent {
+        constructor(readonly type: string) {}
       }
 
-      getBoundingClientRect() {
-        return { left: 10, top: 20, width: 200, height: 40 };
-      }
+      const result = (await new vm.Script(expression).runInNewContext({
+        document,
+        Element: FakeElement,
+        EventTarget: FakeEventTarget,
+        MouseEvent: FakeMouseEvent,
+        window: { getComputedStyle: () => ({ visibility: "visible", display: "block" }) },
+        setTimeout: (callback: () => void) => {
+          callback();
+          return 0;
+        },
+      })) as { status?: string; clickPoint?: { x: number; y: number } };
 
-      closest(selector: string) {
-        if (selector.includes("popover")) return this.inPopover ? popover : null;
-        return this;
-      }
-
-      querySelector() {
-        return null;
-      }
-
-      querySelectorAll() {
-        return [];
-      }
-
-      scrollIntoView() {}
-
-      override onClick() {
-        this.clickCount += 1;
-        this.clickAction?.();
-      }
-    }
-
-    const popover = {};
-    const plusButton = new FakeElement("", plusLabel, false, () => {
-      menuOpen = true;
-    });
-    const githubRow = new FakeElement("GitHub 搜索和引用代码", "", true);
-    const deepResearchRow = new FakeElement(row, "", true, () => {
-      activated = true;
-    });
-    const deepResearchPill = new FakeElement(pill);
-    const menuRows = [githubRow, deepResearchRow];
-    const document = {
-      querySelector: () => null,
-      querySelectorAll: (selector: string) => {
-        if (selector.includes("composer-pill")) return activated ? [deepResearchPill] : [];
-        if (selector === '[data-testid="composer"], form, [class*="composer"]') return [];
-        if (selector === 'input, textarea, [contenteditable="true"]') return [];
-        if (selector === "button") return [plusButton];
-        if (selector.includes('[role="menuitemradio"]')) return menuOpen ? menuRows : [];
-        return [];
-      },
-    };
-    class FakeMouseEvent {
-      constructor(readonly type: string) {}
-    }
-
-    const result = (await new vm.Script(expression).runInNewContext({
-      document,
-      Element: FakeElement,
-      EventTarget: FakeEventTarget,
-      MouseEvent: FakeMouseEvent,
-      window: { getComputedStyle: () => ({ visibility: "visible", display: "block" }) },
-      setTimeout: (callback: () => void) => {
-        callback();
-        return 0;
-      },
-    })) as { status?: string };
-
-    expect(result.status).toBe("activated");
-    expect(deepResearchRow.clickCount).toBeGreaterThan(0);
-    expect(githubRow.clickCount).toBe(0);
-  });
+      expect(result.status).toBe(initiallyActive ? "already-active" : "selection-ready");
+      expect(result.clickPoint).toEqual(initiallyActive ? undefined : { x: 110, y: 100 });
+      expect(deepResearchRow.clickCount).toBe(0);
+      expect(githubRow.clickCount).toBe(0);
+    },
+  );
 });
 
 describe("isDeepResearchPlaceholderTextForTest", () => {

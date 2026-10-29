@@ -259,6 +259,13 @@ async function resumeBrowserSessionInternal(
         cancellation.call(() =>
           waitForDeepResearch(Runtime, logger, timeoutMs, minTurnIndex ?? undefined, Page, client, {
             requireScopedTargetOwner: true,
+            ...(runtime.submittedPromptHash
+              ? {
+                  submittedPromptHash: runtime.submittedPromptHash,
+                  conversationId:
+                    runtime.conversationId ?? extractConversationIdFromUrl(runtime.tabUrl ?? ""),
+                }
+              : {}),
           }),
         ),
         timeoutMs + 5_000,
@@ -527,6 +534,13 @@ async function resumeBrowserSessionViaNewChrome(
       const researchResult = await cancellation.call(() =>
         waitForDeepResearch(Runtime, logger, timeoutMs, minTurnIndex ?? undefined, Page, client, {
           requireScopedTargetOwner: true,
+          ...(runtime.submittedPromptHash
+            ? {
+                submittedPromptHash: runtime.submittedPromptHash,
+                conversationId:
+                  runtime.conversationId ?? extractConversationIdFromUrl(runtime.tabUrl ?? ""),
+              }
+            : {}),
         }),
       );
       return {
