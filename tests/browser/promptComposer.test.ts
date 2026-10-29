@@ -859,65 +859,87 @@ describe("promptComposer", () => {
     });
   });
 
-  test("sends despite a rate-limited sidebar and marks prompt submitted", async () => {
-    const onPromptSubmitted = vi.fn();
-    const runtime = {
-      evaluate: vi.fn(async ({ expression }: { expression: string }) => {
-        if (expression.includes("document.readyState")) {
-          return { result: { value: { ready: true, composer: true, fileInput: false } } };
-        }
-        if (expression.includes("focused: true")) {
-          return { result: { value: { focused: true } } };
-        }
-        if (expression.includes("editorText")) {
+  test.each([false, true])(
+    "sends despite a rate-limited sidebar (Deep Research=%s)",
+    async (deepResearch) => {
+      const onPromptSubmitted = vi.fn();
+      const actions: string[] = [];
+      const runtime = {
+        evaluate: vi.fn(async ({ expression }: { expression: string }) => {
+          if (expression.includes("findDeepResearchItem")) {
+            actions.push("research-selected");
+            return {
+              result: { value: { status: "selection-ready", clickPoint: { x: 12, y: 34 } } },
+            };
+          }
+          if (expression.includes("findDeepResearchPill")) return { result: { value: true } };
+          if (expression.includes("document.readyState")) {
+            return { result: { value: { ready: true, composer: true, fileInput: false } } };
+          }
+          if (expression.includes("focused: true")) {
+            return { result: { value: { focused: true } } };
+          }
+          if (expression.includes("editorText")) {
+            return {
+              result: { value: { editorText: "hello", fallbackValue: "", activeValue: "hello" } },
+            };
+          }
+          if (expression.includes("chatListUnavailable")) {
+            return { result: { value: true } };
+          }
+          if (expression.includes("button.scrollIntoView")) {
+            actions.push("sent");
+            return { result: { value: { status: "clicked" } } };
+          }
           return {
-            result: { value: { editorText: "hello", fallbackValue: "", activeValue: "hello" } },
-          };
-        }
-        if (expression.includes("chatListUnavailable")) {
-          return { result: { value: true } };
-        }
-        if (expression.includes("button.scrollIntoView")) {
-          return { result: { value: { status: "clicked" } } };
-        }
-        return {
-          result: {
-            value: {
-              baseline: 0,
-              turnsCount: 1,
-              userMatched: true,
-              prefixMatched: false,
-              lastMatched: true,
-              hasNewTurn: true,
-              stopVisible: true,
-              assistantVisible: false,
-              composerCleared: true,
-              inConversation: true,
+            result: {
+              value: {
+                baseline: 0,
+                turnsCount: 1,
+                userMatched: true,
+                prefixMatched: false,
+                lastMatched: true,
+                hasNewTurn: true,
+                stopVisible: true,
+                assistantVisible: false,
+                composerCleared: true,
+                inConversation: true,
+              },
             },
-          },
-        };
-      }),
-    };
-    const input = { insertText: vi.fn(), dispatchKeyEvent: vi.fn() };
-    const logger = Object.assign(vi.fn(), { verbose: false });
+          };
+        }),
+      };
+      const input = {
+        insertText: vi.fn(async () => {
+          actions.push("typed");
+        }),
+        dispatchKeyEvent: vi.fn(),
+        dispatchMouseEvent: vi.fn(async () => undefined),
+      };
+      const logger = Object.assign(vi.fn(), { verbose: false });
 
-    await submitPrompt(
-      {
-        runtime: runtime as never,
-        input: input as never,
-        baselineTurns: 0,
-        onPromptSubmitted,
-      },
-      "hello",
-      logger as never,
-    );
+      await submitPrompt(
+        {
+          runtime: runtime as never,
+          input: input as never,
+          baselineTurns: 0,
+          onPromptSubmitted,
+          deepResearch,
+        },
+        "hello",
+        logger as never,
+      );
 
-    expect(onPromptSubmitted).toHaveBeenCalledTimes(1);
-    expect(input.dispatchKeyEvent).not.toHaveBeenCalled();
-    expect(logger).toHaveBeenCalledWith(
-      expect.stringContaining("attempting the composer send anyway"),
-    );
-  });
+      expect(onPromptSubmitted).toHaveBeenCalledTimes(1);
+      expect(actions).toEqual(
+        deepResearch ? ["typed", "research-selected", "sent"] : ["typed", "sent"],
+      );
+      expect(input.dispatchKeyEvent).not.toHaveBeenCalled();
+      expect(logger).toHaveBeenCalledWith(
+        expect.stringContaining("attempting the composer send anyway"),
+      );
+    },
+  );
 
   test("does not send Enter while a trusted click commits after the old fallback deadline", async () => {
     vi.useFakeTimers();

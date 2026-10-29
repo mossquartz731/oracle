@@ -3,9 +3,30 @@ import {
   browserPromptFingerprint,
   readSubmittedPromptFingerprint,
   readUserMessageIds,
+  readUserMessageIdsMatchingFingerprint,
 } from "../../src/browser/promptFingerprint.js";
 import type { ChromeClient } from "../../src/browser/types.js";
 import { FakeDocument, FakeElement } from "./domFixture.js";
+
+test("resolves provider IDs only for the exact committed DOM fingerprint", async () => {
+  const runtime = {
+    evaluate: async () => ({
+      result: { value: [{ text: "Exact submitted text", ids: ["dom-user", "provider-user"] }] },
+    }),
+  } as unknown as ChromeClient["Runtime"];
+  expect(
+    await readUserMessageIdsMatchingFingerprint(
+      runtime,
+      browserPromptFingerprint("Exact submitted text", "dom-user"),
+    ),
+  ).toEqual(["dom-user", "provider-user"]);
+  expect(
+    await readUserMessageIdsMatchingFingerprint(
+      runtime,
+      browserPromptFingerprint("Different text", "dom-user"),
+    ),
+  ).toEqual([]);
+});
 
 test("captures a new message when earlier turns unmount during submission", async () => {
   const user = (text: string, id: string) => ({

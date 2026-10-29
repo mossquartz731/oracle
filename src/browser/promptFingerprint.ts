@@ -8,6 +8,27 @@ export function browserPromptFingerprint(value: unknown, messageId: string): str
     .digest("hex");
 }
 
+/** Resolve the provider message IDs only after matching the committed DOM fingerprint. */
+export async function readUserMessageIdsMatchingFingerprint(
+  runtime: ChromeClient["Runtime"],
+  fingerprint: string,
+): Promise<string[]> {
+  const { result } = await runtime.evaluate({
+    expression: `(() => Array.from(document.querySelectorAll(':is([data-message-author-role="user"], [data-content-search-unit-key$=":user"], [data-chatgpt-search-unit-key$=":user"])'), user => {
+      const ids = [user.getAttribute('data-message-id'), user.getAttribute('data-chatgpt-selection-message-id'), ...(user.getAttribute('data-chatgpt-search-message-ids') || '').split(' '), user.closest('[data-turn-key]')?.getAttribute('data-turn-key'), user.getAttribute('data-content-search-unit-key'), user.getAttribute('data-chatgpt-search-unit-key')].filter(Boolean);
+      return { text: (user.querySelector('[data-user-message-bubble="true"]') || user).textContent, ids };
+    }))()`,
+    returnByValue: true,
+  });
+  if (!Array.isArray(result?.value)) return [];
+  for (const user of result.value as Array<{ text?: unknown; ids?: unknown }>) {
+    if (typeof user.text !== "string" || !Array.isArray(user.ids)) continue;
+    const ids = user.ids.filter((id): id is string => typeof id === "string" && Boolean(id));
+    if (ids[0] && browserPromptFingerprint(user.text, ids[0]) === fingerprint) return ids;
+  }
+  return [];
+}
+
 export function readUserMessageIds(
   runtime: ChromeClient["Runtime"],
   timeoutMs = 0,

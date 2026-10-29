@@ -30,6 +30,7 @@ import { buildAttachmentProgressExpression } from "./attachmentProgress.js";
 import { buildActiveComposerRootExpression } from "./composerRoot.js";
 import { buildInstallCompletionAnnouncementExpression } from "./completionAnnouncement.js";
 import { activateWebSearch } from "./webSearch.js";
+import { activateDeepResearch } from "./deepResearch.js";
 
 const ENTER_KEY_EVENT = {
   key: "Enter",
@@ -69,6 +70,7 @@ export async function submitPrompt(
     attachmentTimeoutMs?: number | null;
     onPromptSubmitted?: () => Promise<void> | void;
     webSearch?: boolean;
+    deepResearch?: boolean;
   },
   prompt: string,
   logger: BrowserLogger,
@@ -339,6 +341,8 @@ export async function submitPrompt(
   }
 
   if (deps.webSearch) await activateWebSearch(runtime, input, prompt, logger);
+  // Current Deep Research is an editor app mention; select it after typing.
+  if (deps.deepResearch) await activateDeepResearch(runtime, input, logger);
   await warnIfChatListRateLimited(runtime, logger);
 
   // Install before the click: a short answer can complete while commit verification runs.
