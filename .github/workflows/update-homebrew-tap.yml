@@ -21,29 +21,33 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
 
       - name: Resolve release tag
         id: release
+        env:
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ inputs.tag || github.event.release.tag_name }}"
-          if [[ -z "$tag" ]]; then
-            echo "Missing release tag." >&2
+          if ! git check-ref-format "refs/tags/$TAG"; then
+            echo "Missing or invalid release tag." >&2
             exit 1
           fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "request_id=oracle-${tag}-${GITHUB_RUN_ID}" >> "$GITHUB_OUTPUT"
+          printf 'tag=%s\nrequest_id=oracle-%s-%s\n' "$TAG" "$TAG" "$GITHUB_RUN_ID" >> "$GITHUB_OUTPUT"
 
       - name: Verify release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
         shell: bash
-        run: scripts/verify-release-assets.sh "${{ steps.release.outputs.tag }}"
+        run: scripts/verify-release-assets.sh "$TAG"
 
       - name: Dispatch tap update
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          TAG: ${{ steps.release.outputs.tag }}
+          REQUEST_ID: ${{ steps.release.outputs.request_id }}
         shell: bash
         run: |
           set -euo pipefail
@@ -51,19 +55,21 @@ jobs:
           gh workflow run update-formula.yml \
             --repo steipete/homebrew-tap \
             -f formula=oracle \
-            -f tag="${{ steps.release.outputs.tag }}" \
+            -f tag="$TAG" \
             -f repository=steipete/oracle \
             -f artifact_url='https://github.com/steipete/oracle/releases/download/{tag}/oracle-{version}.tgz' \
-            -f request_id="${{ steps.release.outputs.request_id }}"
+            -f request_id="$REQUEST_ID"
 
       - name: Wait for tap update
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          REQUEST_ID: ${{ steps.release.outputs.request_id }}
         shell: bash
         run: |
           set -euo pipefail
           for _ in {1..20}; do
-            run_id="$(gh run list --repo steipete/homebrew-tap --workflow update-formula.yml --json databaseId,displayTitle --jq '.[] | select(.displayTitle | contains("${{ steps.release.outputs.request_id }}")) | .databaseId' | head -n1)"
+            run_id="$(gh run list --repo steipete/homebrew-tap --workflow update-formula.yml --json databaseId,displayTitle |
+              jq -r --arg id "$REQUEST_ID" '[.[] | select(.displayTitle | contains($id)) | .databaseId] | first // empty')"
             if [[ -n "$run_id" ]]; then
               gh run watch "$run_id" --repo steipete/homebrew-tap --exit-status
               exit 0
